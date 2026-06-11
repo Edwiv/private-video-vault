@@ -13,6 +13,9 @@ const LIBRARY_CACHE_KEY = "active-library";
 const LIBRARY_DEVICE_KEY = "library-device-key";
 const LIBRARY_CACHE_FLAG = "libraryCacheSaved";
 const LIBRARY_CACHE_COOKIE = "videoVaultRemembered";
+const THUMBNAIL_CACHE_PREFIX = "thumbnail:v1:";
+const THUMBNAIL_WIDTH = 160;
+const THUMBNAIL_HEIGHT = 90;
 const VAULT_PRIVATE_KEY = "vault-rsa-private-key";
 const VAULT_KEY_BACKUP = "vault-rsa-private-key-backup";
 const VAULT_PUBLIC_KEY_STORAGE = "vaultPublicKeyPem";
@@ -73,6 +76,11 @@ const videoPlayer = document.querySelector("#videoPlayer");
 const nowPlayingTitle = document.querySelector("#nowPlayingTitle");
 const nowPlayingMeta = document.querySelector("#nowPlayingMeta");
 const template = document.querySelector("#videoItemTemplate");
+const thumbnailTargetVideos = new WeakMap();
+const thumbnailQueue = [];
+const thumbnailQueuedIds = new Set();
+let thumbnailObserver = null;
+let thumbnailQueueActive = false;
 
 vaultOriginInput.value = state.vaultOrigin;
 manifestPathInput.value = state.manifestPath;
@@ -415,6 +423,7 @@ function normalizeHls(hls) {
 }
 
 function renderLibrary(videos) {
+  resetThumbnailObserver();
   libraryList.textContent = "";
   libraryCount.textContent = String(videos.length);
 
@@ -476,7 +485,6 @@ function createFolder(name, path) {
 function renderFolderNode(folder) {
   const details = document.createElement("details");
   details.className = "folder-node";
-  details.open = true;
 
   const summary = document.createElement("summary");
   summary.className = "folder-summary";
@@ -516,11 +524,15 @@ function renderFolderNode(folder) {
 
 function renderVideoItem(video) {
   const item = template.content.firstElementChild.cloneNode(true);
+  const poster = item.querySelector(".poster");
+
   item.dataset.videoId = video.id;
   item.title = video.path || video.title;
+  poster.dataset.thumbnailStatus = "pending";
   item.querySelector("strong").textContent = video.title;
   item.querySelector("small").textContent = videoMeta(video);
   item.addEventListener("click", () => playVideo(video));
+  observeThumbnail(poster, video);
 
   if (video.id === state.currentVideoId) {
     item.setAttribute("aria-current", "true");
@@ -585,6 +597,210 @@ function resolveVideoSource(video) {
 
 function isLocalHls(video) {
   return Boolean(video.hls?.key && video.hls?.variants?.some((variant) => variant.playlist));
+}
+
+function resetThumbnailObserver() {
+  if (thumbnailObserver) {
+    thumbnailObserver.disconnect();
+  }
+
+  thumbnailQueue.length = 0;
+  thumbnailQueuedIds.clear();
+
+  if (!("IntersectionObserver" in window)) {
+    thumbnailObserver = null;
+    return;
+  }
+
+  thumbnailObserver = new IntersectionObserver(handleThumbnailIntersections, {
+    root: libraryList,
+    rootMargin: "96px",
+  });
+}
+
+function observeThumbnail(poster, video) {
+  thumbnailTargetVideos.set(poster, video);
+
+  if (thumbnailObserver) {
+    thumbnailObserver.observe(poster);
+  }
+}
+
+function handleThumbnailIntersections(entries) {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+
+    thumbnailObserver?.unobserve(entry.target);
+    const video = thumbnailTargetVideos.get(entry.target);
+    if (video) {
+      queueThumbnail(entry.target, video);
+    }
+  }
+}
+
+function queueThumbnail(poster, video) {
+  const key = thumbnailCacheKey(video);
+  if (thumbnailQueuedIds.has(key) || poster.dataset.thumbnailStatus === "ready") return;
+
+  thumbnailQueuedIds.add(key);
+  poster.dataset.thumbnailStatus = "loading";
+  thumbnailQueue.push({ key, poster, video });
+  runThumbnailQueue().catch((error) => {
+    console.warn("Thumbnail queue failed", error);
+  });
+}
+
+async function runThumbnailQueue() {
+  if (thumbnailQueueActive) return;
+  thumbnailQueueActive = true;
+
+  try {
+    while (thumbnailQueue.length) {
+      const item = thumbnailQueue.shift();
+      thumbnailQueuedIds.delete(item.key);
+
+      if (!item.poster.isConnected || item.poster.dataset.thumbnailStatus === "ready") {
+        continue;
+      }
+
+      try {
+        const cached = await loadCachedThumbnail(item.video);
+        const thumbnail = cached || (await captureVideoThumbnail(item.video));
+
+        if (thumbnail) {
+          setPosterImage(item.poster, thumbnail);
+          if (!cached) {
+            await saveCachedThumbnail(item.video, thumbnail);
+          }
+        } else {
+          item.poster.dataset.thumbnailStatus = "unavailable";
+        }
+      } catch (error) {
+        item.poster.dataset.thumbnailStatus = "unavailable";
+        console.warn("Thumbnail generation failed", error);
+      }
+    }
+  } finally {
+    thumbnailQueueActive = false;
+  }
+}
+
+function setPosterImage(poster, dataUrl) {
+  poster.style.backgroundImage = `url("${dataUrl}")`;
+  poster.dataset.thumbnailStatus = "ready";
+}
+
+async function loadCachedThumbnail(video) {
+  const record = await idbGet(CACHE_RECORD_STORE, thumbnailCacheKey(video));
+  if (!record) return "";
+
+  try {
+    const payload = await decryptCacheRecord(record);
+    return payload?.videoId === video.id ? String(payload.dataUrl || "") : "";
+  } catch (error) {
+    console.warn("Cached thumbnail restore failed", error);
+    return "";
+  }
+}
+
+async function saveCachedThumbnail(video, dataUrl) {
+  const record = await encryptCacheRecord({
+    version: 1,
+    videoId: video.id,
+    savedAt: new Date().toISOString(),
+    dataUrl,
+  });
+
+  await idbSet(CACHE_RECORD_STORE, thumbnailCacheKey(video), record);
+}
+
+function thumbnailCacheKey(video) {
+  return `${THUMBNAIL_CACHE_PREFIX}${video.id}`;
+}
+
+function captureVideoThumbnail(video) {
+  const src = resolveVideoSource(video);
+  if (!src) return Promise.resolve("");
+
+  return new Promise((resolve) => {
+    const probe = document.createElement("video");
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { alpha: false });
+    let settled = false;
+    let seekStarted = false;
+
+    canvas.width = THUMBNAIL_WIDTH;
+    canvas.height = THUMBNAIL_HEIGHT;
+    probe.crossOrigin = "anonymous";
+    probe.muted = true;
+    probe.playsInline = true;
+    probe.preload = "metadata";
+    probe.className = "thumbnail-probe";
+
+    const timeout = window.setTimeout(() => finish(""), 14000);
+
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      probe.removeAttribute("src");
+      probe.load();
+      probe.remove();
+      resolve(value);
+    }
+
+    function drawFrame() {
+      if (!context || probe.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
+      try {
+        const sourceWidth = probe.videoWidth || THUMBNAIL_WIDTH;
+        const sourceHeight = probe.videoHeight || THUMBNAIL_HEIGHT;
+        const scale = Math.max(THUMBNAIL_WIDTH / sourceWidth, THUMBNAIL_HEIGHT / sourceHeight);
+        const width = sourceWidth * scale;
+        const height = sourceHeight * scale;
+        const x = (THUMBNAIL_WIDTH - width) / 2;
+        const y = (THUMBNAIL_HEIGHT - height) / 2;
+
+        context.drawImage(probe, x, y, width, height);
+        finish(canvas.toDataURL("image/jpeg", 0.72));
+      } catch (error) {
+        console.warn("Thumbnail draw failed", error);
+        finish("");
+      }
+    }
+
+    probe.addEventListener(
+      "loadedmetadata",
+      () => {
+        const duration = Number.isFinite(probe.duration) ? probe.duration : 0;
+        const targetTime = duration > 8 ? Math.min(4, duration * 0.08) : 0.1;
+        seekStarted = true;
+
+        try {
+          probe.currentTime = targetTime;
+        } catch {
+          drawFrame();
+        }
+
+        probe.play?.().then(() => probe.pause()).catch(() => {});
+      },
+      { once: true },
+    );
+
+    probe.addEventListener("seeked", drawFrame, { once: true });
+    probe.addEventListener(
+      "loadeddata",
+      () => {
+        if (!seekStarted) drawFrame();
+      },
+      { once: true },
+    );
+    probe.addEventListener("error", () => finish(""), { once: true });
+
+    document.body.append(probe);
+    probe.src = src;
+    probe.load();
+  });
 }
 
 function normalizeOrigin(value) {
@@ -895,6 +1111,7 @@ async function saveCachedLibrary({ vaultOrigin, manifestPath, library }) {
 
 async function clearCachedLibrary() {
   await Promise.allSettled([
+    idbDeleteByPrefix(CACHE_RECORD_STORE, THUMBNAIL_CACHE_PREFIX),
     idbDelete(CACHE_RECORD_STORE, LIBRARY_CACHE_KEY),
     idbDelete(CACHE_KEY_STORE, LIBRARY_DEVICE_KEY),
   ]);
@@ -1037,6 +1254,34 @@ async function idbDelete(storeName, key) {
     const request = transaction.objectStore(storeName).delete(key);
 
     request.onerror = () => reject(request.error || new Error("IndexedDB delete failed"));
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("IndexedDB transaction failed"));
+    };
+  });
+}
+
+async function idbDeleteByPrefix(storeName, prefix) {
+  const db = await openCacheDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    const store = transaction.objectStore(storeName);
+    const request = store.openCursor();
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+
+      if (String(cursor.key).startsWith(prefix)) {
+        cursor.delete();
+      }
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error || new Error("IndexedDB cursor failed"));
     transaction.oncomplete = () => {
       db.close();
       resolve();

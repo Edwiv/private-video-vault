@@ -393,12 +393,62 @@ textarea:focus {
 }
 
 .poster {
+  position: relative;
+  display: block;
   width: 64px;
   height: 60px;
   border-radius: 6px;
   background:
     linear-gradient(135deg, rgb(45 212 191 / 0.75), rgb(251 113 133 / 0.7)),
     #1f2937;
+  background-position: center;
+  background-size: cover;
+  overflow: hidden;
+}
+
+.poster::after {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  width: 0;
+  height: 0;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  border-left: 10px solid rgb(255 255 255 / 0.82);
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.45));
+  content: "";
+}
+
+.poster[data-thumbnail-status="loading"]::before {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.12), transparent);
+  animation: thumbnail-shimmer 1.2s linear infinite;
+  content: "";
+}
+
+.poster[data-thumbnail-status="ready"] {
+  background-color: #111827;
+}
+
+.thumbnail-probe {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  width: 160px;
+  height: 90px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes thumbnail-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .video-copy {

@@ -10,7 +10,7 @@ const options = parseArgs(process.argv.slice(2));
 
 if (!options.sourceRoot) {
   console.error(
-    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify]",
+    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify] [--passphrase-stdin]",
   );
   process.exit(1);
 }
@@ -18,7 +18,7 @@ if (!options.sourceRoot) {
 const sourceRoot = resolve(options.sourceRoot);
 const targetRoot = resolve(options.targetRoot);
 const libraryPath = join(targetRoot, "library.enc.json");
-const passphrase = process.env.VIDEO_VAULT_PASSPHRASE || (await askHidden("Master key: "));
+const passphrase = await readPassphrase();
 
 if (!passphrase) {
   console.error("Master key is required.");
@@ -454,6 +454,7 @@ function parseArgs(args) {
   const parsed = {
     force: false,
     mode: "copy",
+    passphraseStdin: false,
     sourceRoot: "",
     targetRoot: "vault-next",
     verify: false,
@@ -467,6 +468,8 @@ function parseArgs(args) {
       parsed.force = true;
     } else if (arg === "--verify") {
       parsed.verify = true;
+    } else if (arg === "--passphrase-stdin") {
+      parsed.passphraseStdin = true;
     } else if (arg === "--mode") {
       parsed.mode = String(args[++index] || "");
     } else if (arg.startsWith("--mode=")) {
@@ -483,6 +486,22 @@ function parseArgs(args) {
   parsed.sourceRoot = positional[0] || "";
   parsed.targetRoot = positional[1] || "vault-next";
   return parsed;
+}
+
+async function readPassphrase() {
+  if (process.env.VIDEO_VAULT_PASSPHRASE) {
+    return process.env.VIDEO_VAULT_PASSPHRASE;
+  }
+
+  if (options.passphraseStdin) {
+    const chunks = [];
+    for await (const chunk of input) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  }
+
+  return askHidden("Master key: ");
 }
 
 function run(command, args) {

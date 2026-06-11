@@ -47,8 +47,8 @@ const importedPaths = new Set((library.videos || []).map((video) => video.path).
 const failures = [];
 const skippedEmpty = [];
 
-console.log(`Source root: ${sourceRoot}`);
-console.log(`Target root: ${targetRoot}`);
+console.log(`Source root: ${displayPath(sourceRoot)}`);
+console.log(`Target root: ${displayPath(targetRoot)}`);
 console.log(`Video files: ${sourceFiles.length}`);
 console.log(`Already imported: ${importedPaths.size}`);
 console.log(`Mode: ${options.mode === "copy" ? "copy original streams, no compression" : "transcode"}`);
@@ -189,9 +189,10 @@ async function importOne(sourcePath, index, workerId, writeLibraryQueued) {
     importedPaths.add(libraryItemPath);
     await writeLibraryQueued();
   } catch (error) {
-    failures.push({ path: relativePath, error: error.message || String(error) });
+    const errorMessage = redactMessage(error.message || String(error));
+    failures.push({ path: relativePath, error: errorMessage });
     logProgress(index, "failed", relativePath, workerId, "error");
-    console.error(error.message || error);
+    console.error(errorMessage);
   }
 }
 
@@ -609,6 +610,23 @@ function displayPath(path) {
   return options.redactPaths ? "[redacted]" : path;
 }
 
+function redactMessage(message) {
+  const text = String(message || "");
+  if (!options.redactPaths) return text;
+
+  const videoExtPattern = Array.from(videoExtensions)
+    .map((extension) => escapeRegExp(extension))
+    .join("|");
+
+  return text
+    .replace(new RegExp(`${escapeRegExp(sourceRoot)}[^\\r\\n]*?(?:${videoExtPattern})`, "giu"), "[redacted]")
+    .replace(new RegExp(`${escapeRegExp(targetRoot)}[^\\r\\n\\s]*`, "g"), "[redacted]");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function formatBytes(bytes) {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let value = Number(bytes || 0);
@@ -757,7 +775,7 @@ function capture(command, args) {
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || `${command} exited with ${code}`));
+      else reject(new Error(redactMessage(stderr) || `${command} exited with ${code}`));
     });
   });
 }

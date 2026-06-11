@@ -1,0 +1,10 @@
+{
+  "videos": [
+    {
+      "id": "demo-001",
+      "title": "Demo Video",
+      "duration": "00:02:30",
+      "source": "/objects/demo/master.m3u8"
+    }
+  ]
+}

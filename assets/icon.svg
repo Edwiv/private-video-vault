@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Private Video Vault">
+  <rect width="512" height="512" rx="96" fill="#111827"/>
+  <path d="M150 226h212c28 0 50 22 50 50v86c0 28-22 50-50 50H150c-28 0-50-22-50-50v-86c0-28 22-50 50-50Z" fill="#2dd4bf"/>
+  <path d="M170 226v-46c0-56 40-96 86-96s86 40 86 96v46h-42v-46c0-33-19-56-44-56s-44 23-44 56v46h-42Z" fill="#f8fafc"/>
+  <path d="M234 288v62l58-31-58-31Z" fill="#111827"/>
+</svg>

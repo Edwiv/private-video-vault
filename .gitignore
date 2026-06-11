@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+*.log
+
+# Private vault data generated on a trusted machine.
+library.json
+library.private.json
+library.enc.json

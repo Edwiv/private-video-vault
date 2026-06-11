@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111827" />
+    <title>Private Video Vault</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon-192.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Private Video Vault</p>
+          <h1>视频保险库</h1>
+        </div>
+        <div class="status-pill" id="appStatus">离线就绪</div>
+      </header>
+
+      <main class="workspace">
+        <section class="panel vault-panel" aria-labelledby="vaultTitle">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Vault</p>
+              <h2 id="vaultTitle">解锁</h2>
+            </div>
+            <button class="icon-button" id="clearConfigButton" type="button" title="清除配置" aria-label="清除配置">
+              <span aria-hidden="true">↺</span>
+            </button>
+          </div>
+
+          <form class="vault-form" id="vaultForm">
+            <label>
+              <span>仓库地址</span>
+              <input
+                id="vaultOrigin"
+                name="vaultOrigin"
+                autocomplete="url"
+                inputmode="url"
+                placeholder="https://vault.home.example"
+                required
+              />
+            </label>
+            <label>
+              <span>索引文件</span>
+              <input id="manifestPath" name="manifestPath" autocomplete="off" value="/library.enc.json" required />
+            </label>
+            <label>
+              <span>主密钥</span>
+              <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required />
+            </label>
+            <div class="actions">
+              <button class="primary-button" type="submit">解锁</button>
+              <button class="secondary-button" id="loadSampleButton" type="button">载入示例</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel library-panel" aria-labelledby="libraryTitle">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Library</p>
+              <h2 id="libraryTitle">片库</h2>
+            </div>
+            <span class="count-badge" id="libraryCount">0</span>
+          </div>
+          <div class="library-list" id="libraryList" aria-live="polite"></div>
+        </section>
+
+        <section class="player-zone" aria-label="播放器">
+          <video class="video-player" id="videoPlayer" controls playsinline preload="metadata"></video>
+          <div class="now-playing">
+            <div>
+              <p class="eyebrow">Now Playing</p>
+              <h2 id="nowPlayingTitle">未选择视频</h2>
+            </div>
+            <p id="nowPlayingMeta">等待解锁片库</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="videoItemTemplate">
+      <button class="video-item" type="button">
+        <span class="poster"></span>
+        <span class="video-copy">
+          <strong></strong>
+          <small></small>
+        </span>
+      </button>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

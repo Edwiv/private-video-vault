@@ -11,10 +11,16 @@ const sampleLibrary = {
       title: "本地样片",
       duration: "00:00",
       source: "",
-      variants: [{ label: "HLS", src: "" }],
+      hls: {
+        key: "",
+        iv: "",
+        variants: [{ label: "HLS", bandwidth: 0, playlist: "" }],
+      },
     },
   ],
 };
+
+let serviceWorkerReady = registerServiceWorker();
 
 const form = document.querySelector("#vaultForm");
 const statusEl = document.querySelector("#appStatus");
@@ -32,7 +38,6 @@ vaultOriginInput.value = state.vaultOrigin;
 manifestPathInput.value = state.manifestPath;
 
 renderLibrary([]);
-registerServiceWorker();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -50,6 +55,7 @@ form.addEventListener("submit", async (event) => {
     state.videos = normalizeLibrary(library);
     localStorage.setItem("vaultOrigin", vaultOrigin);
     localStorage.setItem("manifestPath", manifestPath);
+    await configureServiceWorker();
     renderLibrary(state.videos);
     setStatus("已解锁");
   } catch (error) {
@@ -61,6 +67,7 @@ form.addEventListener("submit", async (event) => {
 
 document.querySelector("#loadSampleButton").addEventListener("click", () => {
   state.videos = normalizeLibrary(sampleLibrary);
+  configureServiceWorker().catch((error) => console.warn("Sample worker sync failed", error));
   renderLibrary(state.videos);
   setStatus("示例已载入");
 });
@@ -75,6 +82,7 @@ document.querySelector("#clearConfigButton").addEventListener("click", () => {
   videoPlayer.load();
   nowPlayingTitle.textContent = "未选择视频";
   nowPlayingMeta.textContent = "等待解锁片库";
+  configureServiceWorker().catch((error) => console.warn("Worker clear failed", error));
   renderLibrary([]);
   setStatus("配置已清除");
 });
@@ -137,7 +145,29 @@ function normalizeLibrary(library) {
     duration: String(video.duration || "未知时长"),
     source: String(video.source || video.variants?.[0]?.src || ""),
     variants: Array.isArray(video.variants) ? video.variants : [],
+    hls: normalizeHls(video.hls),
   }));
+}
+
+function normalizeHls(hls) {
+  if (!hls || typeof hls !== "object") return null;
+
+  const variants = Array.isArray(hls.variants)
+    ? hls.variants.map((variant, index) => ({
+        id: String(variant.id || index),
+        label: String(variant.label || `Variant ${index + 1}`),
+        bandwidth: Number(variant.bandwidth || 0),
+        resolution: String(variant.resolution || ""),
+        playlist: String(variant.playlist || ""),
+      }))
+    : [];
+
+  return {
+    key: String(hls.key || ""),
+    iv: String(hls.iv || ""),
+    method: String(hls.method || "AES-128"),
+    variants,
+  };
 }
 
 function renderLibrary(videos) {
@@ -178,10 +208,20 @@ function playVideo(video) {
 }
 
 function resolveVideoSource(video) {
+  if (isLocalHls(video)) {
+    const url = new URL(`./__vault/hls/${encodeURIComponent(video.id)}/master.m3u8`, window.location.href);
+    url.searchParams.set("v", String(Date.now()));
+    return url.href;
+  }
+
   const source = video.source || video.variants?.[0]?.src || "";
   if (!source) return "";
   if (/^https?:\/\//i.test(source)) return source;
   return `${state.vaultOrigin}${normalizePath(source)}`;
+}
+
+function isLocalHls(video) {
+  return Boolean(video.hls?.key && video.hls?.variants?.some((variant) => variant.playlist));
 }
 
 function normalizeOrigin(value) {
@@ -218,7 +258,36 @@ async function registerServiceWorker() {
 
   try {
     await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.ready;
+
+    if (!navigator.serviceWorker.controller) {
+      await Promise.race([
+        new Promise((resolve) => {
+          navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
+        }),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+    }
   } catch (error) {
     console.warn("Service worker registration failed", error);
   }
+}
+
+async function configureServiceWorker() {
+  await serviceWorkerReady;
+
+  if (!navigator.serviceWorker?.controller) {
+    return;
+  }
+
+  navigator.serviceWorker.controller.postMessage({
+    type: "VAULT_CONFIG",
+    payload: {
+      vaultOrigin: state.vaultOrigin,
+      videos: state.videos.filter(isLocalHls).map((video) => ({
+        id: video.id,
+        hls: video.hls,
+      })),
+    },
+  });
 }

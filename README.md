@@ -5,10 +5,40 @@
 ## 本地预览
 
 ```bash
-python3 -m http.server 4173
+npm run dev
 ```
 
 打开 `http://localhost:4173`。
+
+## 生成并播放 demo vault
+
+用本机上的一个视频生成加密 HLS 分片和加密片库索引：
+
+```bash
+VIDEO_VAULT_PASSPHRASE=demo-secret node tools/build-demo-vault.mjs "/path/to/video.mp4" demo-vault
+```
+
+启动只存密文的 vault 服务：
+
+```bash
+npm run vault:serve
+```
+
+另开一个终端启动 PWA：
+
+```bash
+npm run dev
+```
+
+打开 `http://localhost:4173`，输入：
+
+```text
+仓库地址: http://127.0.0.1:8787
+索引文件: /library.enc.json
+主密钥: demo-secret
+```
+
+`demo-vault/` 不会提交到 GitHub。生产环境里，GitHub Pages 上的 PWA 访问内网 vault 时需要 HTTPS，不能用普通 `http://`。
 
 ## 生成加密索引
 
@@ -63,7 +93,19 @@ PWA 会尝试从内网仓库读取一个 AES-GCM 加密索引文件，例如 `/l
       "id": "random-id",
       "title": "Title",
       "duration": "01:30:00",
-      "source": "/objects/random/master.m3u8"
+      "hls": {
+        "method": "AES-128",
+        "key": "base64-raw-16-byte-key",
+        "iv": "0x...",
+        "variants": [
+          {
+            "label": "720p",
+            "bandwidth": 2800000,
+            "resolution": "1280x720",
+            "playlist": "#EXTM3U\n#EXT-X-VERSION:3\n..."
+          }
+        ]
+      }
     }
   ]
 }

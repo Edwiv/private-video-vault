@@ -6,3 +6,4 @@ node_modules/
 library.json
 library.private.json
 library.enc.json
+demo-vault/

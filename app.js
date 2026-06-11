@@ -13,6 +13,9 @@ const LIBRARY_CACHE_KEY = "active-library";
 const LIBRARY_DEVICE_KEY = "library-device-key";
 const LIBRARY_CACHE_FLAG = "libraryCacheSaved";
 const LIBRARY_CACHE_COOKIE = "videoVaultRemembered";
+const VAULT_PRIVATE_KEY = "vault-rsa-private-key";
+const VAULT_PUBLIC_KEY_STORAGE = "vaultPublicKeyPem";
+const VAULT_PUBLIC_KEY_FINGERPRINT = "vaultPublicKeyFingerprint";
 
 const sampleLibrary = {
   videos: [
@@ -55,6 +58,10 @@ const statusEl = document.querySelector("#appStatus");
 const vaultOriginInput = document.querySelector("#vaultOrigin");
 const manifestPathInput = document.querySelector("#manifestPath");
 const passphraseInput = document.querySelector("#passphrase");
+const publicKeyOutput = document.querySelector("#publicKey");
+const generateKeyButton = document.querySelector("#generateKeyButton");
+const copyPublicKeyButton = document.querySelector("#copyPublicKeyButton");
+const keyStatus = document.querySelector("#keyStatus");
 const libraryList = document.querySelector("#libraryList");
 const libraryCount = document.querySelector("#libraryCount");
 const videoPlayer = document.querySelector("#videoPlayer");
@@ -64,8 +71,12 @@ const template = document.querySelector("#videoItemTemplate");
 
 vaultOriginInput.value = state.vaultOrigin;
 manifestPathInput.value = state.manifestPath;
+publicKeyOutput.value = localStorage.getItem(VAULT_PUBLIC_KEY_STORAGE) || "";
 
 renderLibrary([]);
+refreshKeyUi().catch((error) => {
+  console.warn("Key status refresh failed", error);
+});
 restoreCachedLibrary().catch((error) => {
   console.warn("Cached library restore failed", error);
 });
@@ -106,6 +117,39 @@ document.querySelector("#loadSampleButton").addEventListener("click", () => {
   setStatus("示例已载入");
 });
 
+generateKeyButton.addEventListener("click", async () => {
+  setStatus("正在生成密钥");
+
+  try {
+    const { privateKey, publicKeyPem, fingerprint } = await generateVaultKeyPair();
+    await idbSet(CACHE_KEY_STORE, VAULT_PRIVATE_KEY, privateKey);
+    localStorage.setItem(VAULT_PUBLIC_KEY_STORAGE, publicKeyPem);
+    localStorage.setItem(VAULT_PUBLIC_KEY_FINGERPRINT, fingerprint);
+    publicKeyOutput.value = publicKeyPem;
+    await refreshKeyUi();
+    setStatus("密钥已生成");
+  } catch (error) {
+    console.error(error);
+    setStatus("密钥生成失败");
+  }
+});
+
+copyPublicKeyButton.addEventListener("click", async () => {
+  const value = publicKeyOutput.value.trim();
+  if (!value) {
+    setStatus("没有公钥");
+    return;
+  }
+
+  try {
+    await copyText(value);
+    setStatus("公钥已复制");
+  } catch (error) {
+    console.error(error);
+    setStatus("复制失败");
+  }
+});
+
 document.querySelector("#clearConfigButton").addEventListener("click", async () => {
   setStatus("正在清除");
   localStorage.removeItem("vaultOrigin");
@@ -140,11 +184,18 @@ async function fetchEncryptedManifest(vaultOrigin, manifestPath) {
 
 async function decryptManifest(envelope, passphrase) {
   if (!envelope || envelope.version !== 1) {
+    if (envelope?.version === 2) {
+      return decryptRecipientManifest(envelope);
+    }
     throw new Error("Unsupported manifest envelope");
   }
 
   if (envelope.cipher !== "AES-GCM" || envelope.kdf?.name !== "PBKDF2") {
     throw new Error("Unsupported crypto settings");
+  }
+
+  if (!passphrase) {
+    throw new Error("Passphrase is required for legacy vaults");
   }
 
   const salt = fromBase64(envelope.kdf.salt);
@@ -171,6 +222,28 @@ async function decryptManifest(envelope, passphrase) {
     ["decrypt"],
   );
 
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+async function decryptRecipientManifest(envelope) {
+  if (envelope.cipher !== "AES-GCM" || envelope.keyWrap?.name !== "RSA-OAEP") {
+    throw new Error("Unsupported recipient envelope");
+  }
+
+  const privateKey = await getVaultPrivateKey();
+  if (!privateKey) {
+    throw new Error("Device private key is missing");
+  }
+
+  const rawKey = await crypto.subtle.decrypt(
+    { name: "RSA-OAEP" },
+    privateKey,
+    fromBase64(envelope.keyWrap.wrappedKey),
+  );
+  const key = await crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, false, ["decrypt"]);
+  const iv = fromBase64(envelope.iv);
+  const data = fromBase64(envelope.data);
   const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
   return JSON.parse(new TextDecoder().decode(plaintext));
 }
@@ -487,6 +560,72 @@ function toBase64(bytes) {
     binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
   }
   return btoa(binary);
+}
+
+async function generateVaultKeyPair() {
+  const pair = await crypto.subtle.generateKey(
+    {
+      name: "RSA-OAEP",
+      modulusLength: 4096,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: "SHA-256",
+    },
+    true,
+    ["encrypt", "decrypt"],
+  );
+  const publicSpki = new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey));
+  const privatePkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    privatePkcs8,
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    false,
+    ["decrypt"],
+  );
+  privatePkcs8.fill(0);
+
+  return {
+    privateKey,
+    publicKeyPem: pemFromBytes("PUBLIC KEY", publicSpki),
+    fingerprint: await fingerprintBytes(publicSpki),
+  };
+}
+
+async function getVaultPrivateKey() {
+  return idbGet(CACHE_KEY_STORE, VAULT_PRIVATE_KEY);
+}
+
+async function refreshKeyUi() {
+  const privateKey = await getVaultPrivateKey();
+  const fingerprint = localStorage.getItem(VAULT_PUBLIC_KEY_FINGERPRINT) || "";
+  publicKeyOutput.value = localStorage.getItem(VAULT_PUBLIC_KEY_STORAGE) || publicKeyOutput.value;
+  keyStatus.textContent = privateKey ? fingerprint || "已生成" : "未生成";
+  copyPublicKeyButton.disabled = !publicKeyOutput.value.trim();
+}
+
+function pemFromBytes(label, bytes) {
+  const base64 = toBase64(bytes);
+  const lines = base64.match(/.{1,64}/g) || [];
+  return [`-----BEGIN ${label}-----`, ...lines, `-----END ${label}-----`].join("\n");
+}
+
+async function fingerprintBytes(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return `sha256:${[...digest.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  publicKeyOutput.focus();
+  publicKeyOutput.select();
+  if (!document.execCommand("copy")) {
+    throw new Error("Clipboard copy failed");
+  }
+  publicKeyOutput.setSelectionRange(0, 0);
 }
 
 function setStatus(message) {

@@ -48,9 +48,20 @@
               <span>索引文件</span>
               <input id="manifestPath" name="manifestPath" autocomplete="off" value="/library.enc.json" required />
             </label>
+            <div class="key-panel">
+              <div class="key-status-row">
+                <span>设备密钥</span>
+                <strong id="keyStatus">未生成</strong>
+              </div>
+              <textarea id="publicKey" rows="6" readonly placeholder="生成后显示公钥"></textarea>
+              <div class="actions key-actions">
+                <button class="secondary-button" id="generateKeyButton" type="button">生成密钥</button>
+                <button class="secondary-button" id="copyPublicKeyButton" type="button">复制公钥</button>
+              </div>
+            </div>
             <label>
-              <span>主密钥</span>
-              <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required />
+              <span>兼容口令</span>
+              <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" />
             </label>
             <div class="actions">
               <button class="primary-button" type="submit">解锁</button>

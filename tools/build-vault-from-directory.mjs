@@ -1,4 +1,12 @@
-import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
+import {
+  constants,
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  pbkdf2Sync,
+  publicEncrypt,
+  randomBytes,
+} from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { readdir, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
@@ -10,7 +18,7 @@ const options = parseArgs(process.argv.slice(2));
 
 if (!options.sourceRoot) {
   console.error(
-    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify] [--passphrase-stdin]",
+    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify] [--passphrase-stdin] [--recipient-public-key public.pem]",
   );
   process.exit(1);
 }
@@ -18,9 +26,10 @@ if (!options.sourceRoot) {
 const sourceRoot = resolve(options.sourceRoot);
 const targetRoot = resolve(options.targetRoot);
 const libraryPath = join(targetRoot, "library.enc.json");
-const passphrase = await readPassphrase();
+const recipientPublicKey = await readRecipientPublicKey();
+const passphrase = recipientPublicKey ? "" : await readPassphrase();
 
-if (!passphrase) {
+if (!recipientPublicKey && !passphrase) {
   console.error("Master key is required.");
   process.exit(1);
 }
@@ -42,6 +51,7 @@ console.log(`Target root: ${targetRoot}`);
 console.log(`Video files: ${sourceFiles.length}`);
 console.log(`Already imported: ${importedPaths.size}`);
 console.log(`Mode: ${options.mode === "copy" ? "copy original streams, no compression" : "transcode"}`);
+console.log(`Manifest crypto: ${recipientPublicKey ? "recipient public key" : "legacy passphrase"}`);
 
 await writeEncryptedLibrary(library, libraryPath);
 
@@ -77,7 +87,7 @@ for (let index = 0; index < sourceFiles.length; index += 1) {
 
 if (options.verify) {
   console.log("Verifying encrypted library and HLS entries...");
-  const verifiedLibrary = await readEncryptedLibrary(libraryPath);
+  const verifiedLibrary = recipientPublicKey ? library : await readEncryptedLibrary(libraryPath);
   const verifyFailures = await verifyLibrary(verifiedLibrary);
   failures.push(...verifyFailures);
 }
@@ -117,6 +127,19 @@ async function findVideoFiles(root) {
 async function readExistingLibrary() {
   if (options.force) {
     return createEmptyLibrary();
+  }
+
+  if (recipientPublicKey) {
+    try {
+      await stat(libraryPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return createEmptyLibrary();
+      }
+      throw error;
+    }
+
+    throw new Error("Recipient public key mode cannot resume an existing encrypted library. Use --force.");
   }
 
   try {
@@ -395,6 +418,14 @@ async function readEncryptedLibrary(path) {
 }
 
 async function writeEncryptedLibrary(library, path) {
+  if (recipientPublicKey) {
+    return writeRecipientEncryptedLibrary(library, path);
+  }
+
+  return writePassphraseEncryptedLibrary(library, path);
+}
+
+async function writePassphraseEncryptedLibrary(library, path) {
   const plaintext = Buffer.from(`${JSON.stringify(library, null, 2)}\n`, "utf8");
   const salt = randomBytes(16);
   const iv = randomBytes(12);
@@ -417,6 +448,49 @@ async function writeEncryptedLibrary(library, path) {
   };
 
   await writeFile(path, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function writeRecipientEncryptedLibrary(library, path) {
+  const plaintext = Buffer.from(`${JSON.stringify(library, null, 2)}\n`, "utf8");
+  const contentKey = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", contentKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const wrappedKey = publicEncrypt(
+    {
+      key: recipientPublicKey,
+      oaepHash: "sha256",
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    contentKey,
+  );
+  const envelope = {
+    version: 2,
+    cipher: "AES-GCM",
+    keyWrap: {
+      name: "RSA-OAEP",
+      hash: "SHA-256",
+      publicKeyFingerprint: publicKeyFingerprint(recipientPublicKey),
+      wrappedKey: wrappedKey.toString("base64"),
+    },
+    iv: iv.toString("base64"),
+    data: Buffer.concat([encrypted, tag]).toString("base64"),
+  };
+
+  contentKey.fill(0);
+  await writeFile(path, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
+}
+
+function publicKeyFingerprint(publicKeyPem) {
+  const der = Buffer.from(
+    String(publicKeyPem)
+      .replace(/-----BEGIN PUBLIC KEY-----/g, "")
+      .replace(/-----END PUBLIC KEY-----/g, "")
+      .replace(/\s+/g, ""),
+    "base64",
+  );
+  return `sha256:${createHash("sha256").update(der).digest("hex").slice(0, 16)}`;
 }
 
 function formatResolution(info) {
@@ -455,6 +529,7 @@ function parseArgs(args) {
     force: false,
     mode: "copy",
     passphraseStdin: false,
+    recipientPublicKeyPath: "",
     sourceRoot: "",
     targetRoot: "vault-next",
     verify: false,
@@ -470,6 +545,10 @@ function parseArgs(args) {
       parsed.verify = true;
     } else if (arg === "--passphrase-stdin") {
       parsed.passphraseStdin = true;
+    } else if (arg === "--recipient-public-key") {
+      parsed.recipientPublicKeyPath = String(args[++index] || "");
+    } else if (arg.startsWith("--recipient-public-key=")) {
+      parsed.recipientPublicKeyPath = arg.slice("--recipient-public-key=".length);
     } else if (arg === "--mode") {
       parsed.mode = String(args[++index] || "");
     } else if (arg.startsWith("--mode=")) {
@@ -502,6 +581,19 @@ async function readPassphrase() {
   }
 
   return askHidden("Master key: ");
+}
+
+async function readRecipientPublicKey() {
+  const inlineKey = process.env.VIDEO_VAULT_RECIPIENT_PUBLIC_KEY || "";
+  if (inlineKey.trim()) {
+    return inlineKey.trim();
+  }
+
+  if (!options.recipientPublicKeyPath) {
+    return "";
+  }
+
+  return readFile(resolve(options.recipientPublicKeyPath), "utf8");
 }
 
 function run(command, args) {

@@ -9,7 +9,9 @@ const options = parseArgs(process.argv.slice(2));
 const { sourcePath, targetRoot } = options;
 
 if (!sourcePath) {
-  console.error("Usage: node tools/build-demo-vault.mjs <source.mp4> [target-dir] [--mode copy|transcode] [--title name]");
+  console.error(
+    "Usage: node tools/build-demo-vault.mjs <source.mp4> [target-dir] [--mode copy|transcode] [--title name] [--folder path] [--path path]",
+  );
   process.exit(1);
 }
 
@@ -34,7 +36,8 @@ await writeFile(keyPath, contentKey, { mode: 0o600 });
 await writeFile(keyInfoPath, [`key.bin`, keyPath, iv].join("\n"), { mode: 0o600 });
 
 const sourceInfo = await probeSource(sourcePath);
-const title = options.title || basename(sourcePath, extname(sourcePath));
+const title = options.title || titleFromOptions();
+const libraryPath = libraryPathFromOptions(title);
 
 try {
   console.log(`Import mode: ${options.mode === "copy" ? "copy original streams, no compression" : "transcode"}`);
@@ -49,6 +52,7 @@ try {
       {
         id: videoId,
         title,
+        path: libraryPath,
         duration: formatDuration(sourceInfo.duration),
         hls: {
           method: "AES-128",
@@ -82,6 +86,8 @@ function parseArgs(args) {
     sourcePath: "",
     targetRoot: "demo-vault",
     title: "",
+    folder: "",
+    path: "",
   };
   const positional = [];
 
@@ -96,6 +102,14 @@ function parseArgs(args) {
       parsed.title = String(args[++index] || "");
     } else if (arg.startsWith("--title=")) {
       parsed.title = arg.slice("--title=".length);
+    } else if (arg === "--folder") {
+      parsed.folder = String(args[++index] || "");
+    } else if (arg.startsWith("--folder=")) {
+      parsed.folder = arg.slice("--folder=".length);
+    } else if (arg === "--path") {
+      parsed.path = String(args[++index] || "");
+    } else if (arg.startsWith("--path=")) {
+      parsed.path = arg.slice("--path=".length);
     } else {
       positional.push(arg);
     }
@@ -108,6 +122,31 @@ function parseArgs(args) {
   parsed.sourcePath = positional[0] || "";
   parsed.targetRoot = positional[1] || "demo-vault";
   return parsed;
+}
+
+function titleFromOptions() {
+  const pathTitle = pathSegments(options.path).at(-1);
+  if (pathTitle) return stripExtension(pathTitle);
+  return basename(sourcePath, extname(sourcePath));
+}
+
+function libraryPathFromOptions(title) {
+  const explicitPath = pathSegments(options.path);
+  if (explicitPath.length) return explicitPath.join("/");
+
+  const folder = pathSegments(options.folder);
+  return [...folder, title].join("/");
+}
+
+function pathSegments(value) {
+  return String(value || "")
+    .split(/[\\/]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && segment !== "." && segment !== "..");
+}
+
+function stripExtension(value) {
+  return basename(value, extname(value));
 }
 
 function createFfmpegArgs() {

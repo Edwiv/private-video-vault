@@ -206,7 +206,11 @@ input:focus {
 
 .library-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  align-content: start;
+  max-height: 540px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .empty-state {
@@ -217,6 +221,103 @@ input:focus {
   border-radius: 8px;
   color: var(--muted);
   text-align: center;
+}
+
+.folder-node {
+  display: grid;
+  gap: 8px;
+}
+
+.folder-summary {
+  display: grid;
+  grid-template-columns: 18px 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #101720;
+  cursor: pointer;
+  list-style: none;
+}
+
+.folder-summary::-webkit-details-marker {
+  display: none;
+}
+
+.folder-summary:hover,
+.folder-summary:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.folder-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.folder-arrow::before {
+  content: ">";
+  font-weight: 800;
+}
+
+.folder-node[open] > .folder-summary .folder-arrow {
+  transform: rotate(90deg);
+}
+
+.folder-icon {
+  position: relative;
+  width: 20px;
+  height: 15px;
+  border: 1px solid rgb(45 212 191 / 0.58);
+  border-radius: 3px;
+  background: rgb(45 212 191 / 0.12);
+}
+
+.folder-icon::before {
+  position: absolute;
+  top: -5px;
+  left: 1px;
+  width: 9px;
+  height: 5px;
+  border: 1px solid rgb(45 212 191 / 0.58);
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  background: rgb(45 212 191 / 0.12);
+  content: "";
+}
+
+.folder-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-count {
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgb(255 255 255 / 0.05);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.folder-children {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 4px 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
 }
 
 .video-item {
@@ -238,6 +339,11 @@ input:focus {
 .video-item:focus-visible {
   border-color: var(--accent);
   outline: none;
+}
+
+.video-item[aria-current="true"] {
+  border-color: var(--accent);
+  background: rgb(20 184 166 / 0.15);
 }
 
 .poster {

@@ -18,6 +18,18 @@ npm run dev
 VIDEO_VAULT_PASSPHRASE='<strong-passphrase>' node tools/build-demo-vault.mjs "/path/to/video.mp4" vault --mode copy --title "Video Title"
 ```
 
+可以给视频写入展示目录，PWA 解锁后会按文件树显示：
+
+```bash
+VIDEO_VAULT_PASSPHRASE='<strong-passphrase>' node tools/build-demo-vault.mjs "/path/to/video.mp4" vault --mode copy --folder "Movies/2026" --title "Video Title"
+```
+
+也可以直接指定完整展示路径：
+
+```bash
+VIDEO_VAULT_PASSPHRASE='<strong-passphrase>' node tools/build-demo-vault.mjs "/path/to/video.mp4" vault --mode copy --path "Movies/2026/Video Title"
+```
+
 生成完成后，`vault/` 目录中只应保留密文分片和 `library.enc.json`。不要把明文源视频、口令、密钥、真实片名或 `vault/` 提交到 GitHub。
 
 ## 提供内网 vault

@@ -12,16 +12,18 @@ npm run dev
 
 ## 生成并播放 demo vault
 
-用本机上的一个视频生成加密 HLS 分片和加密片库索引：
+用一个视频生成加密 HLS 分片和加密片库索引。默认是 `--mode copy`，只复制原始音视频码流，不重新编码、不压缩画质：
 
 ```bash
 VIDEO_VAULT_PASSPHRASE=demo-secret node tools/build-demo-vault.mjs "/path/to/video.mp4" demo-vault
 ```
 
+如果未来确实需要压低码率，才显式加 `--mode transcode`。
+
 启动只存密文的 vault 服务：
 
 ```bash
-npm run vault:serve
+npm run demo:vault:serve
 ```
 
 另开一个终端启动 PWA：
@@ -39,6 +41,29 @@ npm run dev
 ```
 
 `demo-vault/` 不会提交到 GitHub。生产环境里，GitHub Pages 上的 PWA 访问内网 vault 时需要 HTTPS，不能用普通 `http://`。
+
+## 在 devbox 上导入
+
+把代码同步到 NAS/devbox：
+
+```bash
+rsync -az --delete --exclude '.git/' --exclude 'demo-vault/' --exclude 'vault/' --exclude 'node_modules/' ./ devbox_t4:~/private-video-vault/
+```
+
+把待导入视频临时放到 devbox，然后在 devbox 上生成 `vault/`。生成完成后删除临时明文源文件：
+
+```bash
+rsync -az --progress "/path/to/video.mp4" devbox_t4:~/private-video-vault-import/source.mp4
+ssh devbox_t4 'set -e; SRC="$HOME/private-video-vault-import/source.mp4"; trap "rm -f \"$SRC\"" EXIT; cd "$HOME/private-video-vault"; VIDEO_VAULT_PASSPHRASE=change-this node tools/build-demo-vault.mjs "$SRC" vault --mode copy --title "Demo Video"'
+```
+
+在 devbox 上启动 vault 服务：
+
+```bash
+ssh devbox_t4 'cd ~/private-video-vault && npm run vault:serve:lan'
+```
+
+真实使用时不要用 `demo-secret`，也不要把明文源视频长期留在 NAS 上。
 
 ## 生成加密索引
 

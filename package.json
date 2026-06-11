@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "python3 -m http.server 4173",
-    "vault:serve": "node tools/serve-vault.mjs demo-vault 8787 127.0.0.1",
+    "demo:vault:serve": "node tools/serve-vault.mjs demo-vault 8787 127.0.0.1",
+    "vault:serve": "node tools/serve-vault.mjs vault 8787 127.0.0.1",
+    "vault:serve:lan": "node tools/serve-vault.mjs vault 8787 0.0.0.0",
     "check": "node --check app.js && node --check sw.js && node --check tools/encrypt-library.mjs && node --check tools/build-demo-vault.mjs && node --check tools/serve-vault.mjs"
   }
 }

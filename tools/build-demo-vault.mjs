@@ -5,10 +5,11 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-const [, , sourcePath, targetRoot = "demo-vault"] = process.argv;
+const options = parseArgs(process.argv.slice(2));
+const { sourcePath, targetRoot } = options;
 
 if (!sourcePath) {
-  console.error("Usage: node tools/build-demo-vault.mjs <source.mp4> [target-dir]");
+  console.error("Usage: node tools/build-demo-vault.mjs <source.mp4> [target-dir] [--mode copy|transcode] [--title name]");
   process.exit(1);
 }
 
@@ -33,10 +34,84 @@ await writeFile(keyPath, contentKey, { mode: 0o600 });
 await writeFile(keyInfoPath, [`key.bin`, keyPath, iv].join("\n"), { mode: 0o600 });
 
 const sourceInfo = await probeSource(sourcePath);
-const title = basename(sourcePath, extname(sourcePath));
+const title = options.title || basename(sourcePath, extname(sourcePath));
 
 try {
-  await run("ffmpeg", [
+  console.log(`Import mode: ${options.mode === "copy" ? "copy original streams, no compression" : "transcode"}`);
+  warnIfCopyMayBeUnsupported(sourceInfo, options.mode);
+  await run("ffmpeg", createFfmpegArgs());
+
+  const rawPlaylist = await readFile(rawPlaylistPath, "utf8");
+  const library = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    videos: [
+      {
+        id: videoId,
+        title,
+        duration: formatDuration(sourceInfo.duration),
+        hls: {
+          method: "AES-128",
+          key: contentKey.toString("base64"),
+          iv: `0x${iv}`,
+          variants: [
+            {
+              label: options.mode === "copy" ? "Original" : "720p",
+              bandwidth: estimateBandwidth(sourceInfo, options.mode),
+              resolution: formatResolution(sourceInfo, options.mode),
+              playlist: normalizeMediaPlaylist(rawPlaylist, objectPrefix),
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  await writeEncryptedLibrary(library, passphrase, join(targetRoot, "library.enc.json"));
+  console.log(`Demo vault written to ${targetRoot}`);
+  console.log(`Video id: ${videoId}`);
+} finally {
+  await rm(keyPath, { force: true });
+  await rm(keyInfoPath, { force: true });
+  await rm(rawPlaylistPath, { force: true });
+}
+
+function parseArgs(args) {
+  const parsed = {
+    mode: "copy",
+    sourcePath: "",
+    targetRoot: "demo-vault",
+    title: "",
+  };
+  const positional = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--mode") {
+      parsed.mode = String(args[++index] || "");
+    } else if (arg.startsWith("--mode=")) {
+      parsed.mode = arg.slice("--mode=".length);
+    } else if (arg === "--title") {
+      parsed.title = String(args[++index] || "");
+    } else if (arg.startsWith("--title=")) {
+      parsed.title = arg.slice("--title=".length);
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  if (!["copy", "transcode"].includes(parsed.mode)) {
+    throw new Error("--mode must be copy or transcode");
+  }
+
+  parsed.sourcePath = positional[0] || "";
+  parsed.targetRoot = positional[1] || "demo-vault";
+  return parsed;
+}
+
+function createFfmpegArgs() {
+  const common = [
     "-y",
     "-i",
     sourcePath,
@@ -44,6 +119,30 @@ try {
     "0:v:0",
     "-map",
     "0:a:0?",
+    "-sn",
+    "-dn",
+  ];
+
+  const hls = [
+    "-hls_time",
+    "6",
+    "-hls_playlist_type",
+    "vod",
+    "-hls_segment_type",
+    "mpegts",
+    "-hls_segment_filename",
+    join(objectDir, "segment_%05d.ts"),
+    "-hls_key_info_file",
+    keyInfoPath,
+    rawPlaylistPath,
+  ];
+
+  if (options.mode === "copy") {
+    return [...common, "-c", "copy", ...hls];
+  }
+
+  return [
+    ...common,
     "-vf",
     "scale='min(1280,iw)':-2",
     "-r",
@@ -64,50 +163,8 @@ try {
     "128k",
     "-ac",
     "2",
-    "-hls_time",
-    "6",
-    "-hls_playlist_type",
-    "vod",
-    "-hls_segment_filename",
-    join(objectDir, "segment_%05d.ts"),
-    "-hls_key_info_file",
-    keyInfoPath,
-    rawPlaylistPath,
-  ]);
-
-  const rawPlaylist = await readFile(rawPlaylistPath, "utf8");
-  const library = {
-    version: 1,
-    createdAt: new Date().toISOString(),
-    videos: [
-      {
-        id: videoId,
-        title,
-        duration: formatDuration(sourceInfo.duration),
-        hls: {
-          method: "AES-128",
-          key: contentKey.toString("base64"),
-          iv: `0x${iv}`,
-          variants: [
-            {
-              label: "720p",
-              bandwidth: 2800000,
-              resolution: estimateResolution(sourceInfo),
-              playlist: normalizeMediaPlaylist(rawPlaylist, objectPrefix),
-            },
-          ],
-        },
-      },
-    ],
-  };
-
-  await writeEncryptedLibrary(library, passphrase, join(targetRoot, "library.enc.json"));
-  console.log(`Demo vault written to ${targetRoot}`);
-  console.log(`Video id: ${videoId}`);
-} finally {
-  await rm(keyPath, { force: true });
-  await rm(keyInfoPath, { force: true });
-  await rm(rawPlaylistPath, { force: true });
+    ...hls,
+  ];
 }
 
 async function probeSource(path) {
@@ -115,21 +172,40 @@ async function probeSource(path) {
     "-v",
     "error",
     "-show_entries",
-    "format=duration",
+    "format=duration,bit_rate",
     "-show_entries",
-    "stream=width,height",
-    "-select_streams",
-    "v:0",
+    "stream=codec_type,codec_name,width,height,bit_rate",
     "-of",
     "json",
     path,
   ]);
   const outputJson = JSON.parse(outputText);
+  const streams = Array.isArray(outputJson.streams) ? outputJson.streams : [];
+  const video = streams.find((stream) => stream.codec_type === "video") || {};
+  const audio = streams.find((stream) => stream.codec_type === "audio") || {};
+
   return {
     duration: Number(outputJson.format?.duration || 0),
-    width: Number(outputJson.streams?.[0]?.width || 0),
-    height: Number(outputJson.streams?.[0]?.height || 0),
+    formatBitrate: Number(outputJson.format?.bit_rate || 0),
+    videoCodec: String(video.codec_name || ""),
+    audioCodec: String(audio.codec_name || ""),
+    videoBitrate: Number(video.bit_rate || 0),
+    audioBitrate: Number(audio.bit_rate || 0),
+    width: Number(video.width || 0),
+    height: Number(video.height || 0),
   };
+}
+
+function warnIfCopyMayBeUnsupported(info, mode) {
+  if (mode !== "copy") return;
+  const supportedVideo = ["h264"].includes(info.videoCodec);
+  const supportedAudio = ["aac", "mp3"].includes(info.audioCodec) || !info.audioCodec;
+
+  if (!supportedVideo || !supportedAudio) {
+    console.warn(
+      `Warning: stream-copy mode keeps codecs as-is. iPhone HLS playback is most reliable with H.264/AAC; found ${info.videoCodec || "unknown"}/${info.audioCodec || "none"}.`,
+    );
+  }
 }
 
 function normalizeMediaPlaylist(playlist, objectPrefix) {
@@ -169,11 +245,17 @@ async function writeEncryptedLibrary(library, passphrase, targetPath) {
   await writeFile(targetPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
 }
 
-function estimateResolution(info) {
+function formatResolution(info, mode) {
   if (!info.width || !info.height) return "";
+  if (mode === "copy") return `${info.width}x${info.height}`;
   const width = Math.min(1280, info.width);
   const height = Math.max(2, Math.round((info.height * width) / info.width / 2) * 2);
   return `${width}x${height}`;
+}
+
+function estimateBandwidth(info, mode) {
+  if (mode === "transcode") return 2800000;
+  return Math.max(1, info.formatBitrate || info.videoBitrate + info.audioBitrate || 1);
 }
 
 function formatDuration(seconds) {

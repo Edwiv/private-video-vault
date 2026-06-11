@@ -3,6 +3,8 @@ const state = {
   manifestPath: localStorage.getItem("manifestPath") || "/library.enc.json",
   videos: [],
   currentVideoId: "",
+  query: "",
+  sortMode: localStorage.getItem("librarySortMode") || "title",
 };
 
 const CACHE_DB_NAME = "private-video-vault";
@@ -16,6 +18,7 @@ const LIBRARY_CACHE_COOKIE = "videoVaultRemembered";
 const THUMBNAIL_CACHE_PREFIX = "thumbnail:v1:";
 const THUMBNAIL_WIDTH = 160;
 const THUMBNAIL_HEIGHT = 90;
+const RECENT_VIDEO_STORAGE = "recentVideos";
 const VAULT_PRIVATE_KEY = "vault-rsa-private-key";
 const VAULT_KEY_BACKUP = "vault-rsa-private-key-backup";
 const VAULT_PUBLIC_KEY_STORAGE = "vaultPublicKeyPem";
@@ -59,12 +62,14 @@ let serviceWorkerReady = registerServiceWorker();
 
 const form = document.querySelector("#vaultForm");
 const statusEl = document.querySelector("#appStatus");
+const logoutButton = document.querySelector("#logoutButton");
 const vaultOriginInput = document.querySelector("#vaultOrigin");
 const manifestPathInput = document.querySelector("#manifestPath");
 const passphraseInput = document.querySelector("#passphrase");
 const backupPassphraseInput = document.querySelector("#backupPassphrase");
 const publicKeyOutput = document.querySelector("#publicKey");
 const keyBackupInput = document.querySelector("#keyBackup");
+const keyPanel = document.querySelector(".key-panel");
 const generateKeyButton = document.querySelector("#generateKeyButton");
 const copyPublicKeyButton = document.querySelector("#copyPublicKeyButton");
 const copyKeyBackupButton = document.querySelector("#copyKeyBackupButton");
@@ -72,6 +77,13 @@ const importKeyBackupButton = document.querySelector("#importKeyBackupButton");
 const keyStatus = document.querySelector("#keyStatus");
 const libraryList = document.querySelector("#libraryList");
 const libraryCount = document.querySelector("#libraryCount");
+const folderCount = document.querySelector("#folderCount");
+const sourceCount = document.querySelector("#sourceCount");
+const durationTotal = document.querySelector("#durationTotal");
+const librarySearchInput = document.querySelector("#librarySearch");
+const sortModeInput = document.querySelector("#sortMode");
+const expandAllButton = document.querySelector("#expandAllButton");
+const collapseAllButton = document.querySelector("#collapseAllButton");
 const videoPlayer = document.querySelector("#videoPlayer");
 const nowPlayingTitle = document.querySelector("#nowPlayingTitle");
 const nowPlayingMeta = document.querySelector("#nowPlayingMeta");
@@ -85,6 +97,7 @@ let thumbnailQueueActive = false;
 vaultOriginInput.value = state.vaultOrigin;
 manifestPathInput.value = state.manifestPath;
 publicKeyOutput.value = localStorage.getItem(VAULT_PUBLIC_KEY_STORAGE) || "";
+sortModeInput.value = state.sortMode;
 
 renderLibrary([]);
 refreshKeyUi().catch((error) => {
@@ -115,11 +128,13 @@ form.addEventListener("submit", async (event) => {
     const cacheSaved = await saveCachedLibrary({ vaultOrigin, manifestPath, library });
     await configureServiceWorker();
     renderLibrary(state.videos);
+    setSessionUnlocked(true);
     setStatus(cacheSaved ? "已解锁并记住" : "已解锁");
   } catch (error) {
     console.error(error);
     state.videos = [];
     state.currentVideoId = "";
+    setSessionUnlocked(false);
     setStatus("解锁失败");
     renderLibrary([]);
   }
@@ -129,7 +144,29 @@ document.querySelector("#loadSampleButton").addEventListener("click", () => {
   state.videos = normalizeLibrary(sampleLibrary);
   configureServiceWorker().catch((error) => console.warn("Sample worker sync failed", error));
   renderLibrary(state.videos);
+  setSessionUnlocked(true);
   setStatus("示例已载入");
+});
+
+librarySearchInput.addEventListener("input", () => {
+  state.query = librarySearchInput.value;
+  renderLibrary(state.videos);
+});
+
+sortModeInput.addEventListener("change", () => {
+  state.sortMode = sortModeInput.value;
+  localStorage.setItem("librarySortMode", state.sortMode);
+  renderLibrary(state.videos);
+});
+
+expandAllButton.addEventListener("click", () => {
+  setFolderOpen(true);
+  setStatus("片库已展开");
+});
+
+collapseAllButton.addEventListener("click", () => {
+  setFolderOpen(false);
+  setStatus("片库已收起");
 });
 
 generateKeyButton.addEventListener("click", async () => {
@@ -225,6 +262,8 @@ document.querySelector("#clearConfigButton").addEventListener("click", async () 
   passphraseInput.value = "";
   state.videos = [];
   state.currentVideoId = "";
+  state.query = "";
+  librarySearchInput.value = "";
   videoPlayer.removeAttribute("src");
   videoPlayer.load();
   nowPlayingTitle.textContent = "未选择视频";
@@ -232,7 +271,40 @@ document.querySelector("#clearConfigButton").addEventListener("click", async () 
   await clearCachedLibrary();
   await configureServiceWorker().catch((error) => console.warn("Worker clear failed", error));
   renderLibrary([]);
+  setSessionUnlocked(false);
   setStatus("配置已清除");
+});
+
+logoutButton.addEventListener("click", async () => {
+  setStatus("正在退出");
+  state.videos = [];
+  state.currentVideoId = "";
+  videoPlayer.removeAttribute("src");
+  videoPlayer.load();
+  nowPlayingTitle.textContent = "未选择视频";
+  nowPlayingMeta.textContent = "等待解锁片库";
+  await clearCachedLibrary();
+  await configureServiceWorker().catch((error) => console.warn("Worker logout failed", error));
+  renderLibrary([]);
+  setSessionUnlocked(false);
+  setStatus("已退出");
+  vaultOriginInput.focus();
+});
+
+videoPlayer.addEventListener("playing", () => {
+  if (state.currentVideoId) setStatus("正在播放");
+});
+
+videoPlayer.addEventListener("pause", () => {
+  if (state.currentVideoId && !videoPlayer.ended) setStatus("已暂停");
+});
+
+videoPlayer.addEventListener("ended", () => {
+  if (state.currentVideoId) setStatus("播放结束");
+});
+
+videoPlayer.addEventListener("error", () => {
+  if (state.currentVideoId) setStatus("播放失败");
 });
 
 async function fetchEncryptedManifest(vaultOrigin, manifestPath) {
@@ -493,7 +565,14 @@ function normalizeHls(hls) {
 function renderLibrary(videos) {
   resetThumbnailObserver();
   libraryList.textContent = "";
-  libraryCount.textContent = String(videos.length);
+  const filteredVideos = filterVideos(videos);
+  const tree = buildLibraryTree(filteredVideos);
+  const stats = libraryStats(filteredVideos, tree);
+
+  libraryCount.textContent = filteredVideos.length === videos.length ? String(videos.length) : `${filteredVideos.length}/${videos.length}`;
+  folderCount.textContent = String(stats.folders);
+  sourceCount.textContent = String(stats.playable);
+  durationTotal.textContent = formatDurationTotal(stats.durationSeconds);
 
   if (!videos.length) {
     const empty = document.createElement("div");
@@ -503,7 +582,14 @@ function renderLibrary(videos) {
     return;
   }
 
-  const tree = buildLibraryTree(videos);
+  if (!filteredVideos.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "没有匹配视频";
+    libraryList.append(empty);
+    return;
+  }
+
   const fragment = document.createDocumentFragment();
 
   for (const folder of sortedFolders(tree)) {
@@ -515,6 +601,39 @@ function renderLibrary(videos) {
   }
 
   libraryList.append(fragment);
+}
+
+function filterVideos(videos) {
+  const tokens = state.query
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!tokens.length) return videos;
+
+  return videos.filter((video) => {
+    const haystack = [video.title, video.path, video.duration, videoMeta(video)]
+      .join(" ")
+      .toLocaleLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
+}
+
+function libraryStats(videos, tree) {
+  return {
+    folders: countFolders(tree),
+    playable: videos.filter((video) => resolveVideoSource(video)).length,
+    durationSeconds: videos.reduce((total, video) => total + parseDurationSeconds(video.duration), 0),
+  };
+}
+
+function countFolders(folder) {
+  let count = folder.name ? 1 : 0;
+  for (const child of folder.folders.values()) {
+    count += countFolders(child);
+  }
+  return count;
 }
 
 function buildLibraryTree(videos) {
@@ -553,6 +672,7 @@ function createFolder(name, path) {
 function renderFolderNode(folder) {
   const details = document.createElement("details");
   details.className = "folder-node";
+  details.open = Boolean(state.query.trim());
 
   const summary = document.createElement("summary");
   summary.className = "folder-summary";
@@ -614,7 +734,25 @@ function sortedFolders(folder) {
 }
 
 function sortedVideos(videos) {
-  return [...videos].sort((left, right) => collator.compare(left.title, right.title));
+  const recentOrder = recentVideoOrder();
+
+  return [...videos].sort((left, right) => {
+    if (state.sortMode === "path") {
+      return collator.compare(left.path, right.path) || collator.compare(left.title, right.title);
+    }
+
+    if (state.sortMode === "duration") {
+      return parseDurationSeconds(right.duration) - parseDurationSeconds(left.duration) || collator.compare(left.title, right.title);
+    }
+
+    if (state.sortMode === "recent") {
+      const leftIndex = recentOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = recentOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+      return leftIndex - rightIndex || collator.compare(left.title, right.title);
+    }
+
+    return collator.compare(left.title, right.title);
+  });
 }
 
 function videoMeta(video) {
@@ -622,12 +760,70 @@ function videoMeta(video) {
   return [video.duration, variant?.label, variant?.resolution].filter(Boolean).join(" / ");
 }
 
+function setFolderOpen(open) {
+  for (const folder of libraryList.querySelectorAll(".folder-node")) {
+    folder.open = open;
+  }
+}
+
+function parseDurationSeconds(value) {
+  const parts = String(value || "")
+    .split(":")
+    .map((part) => Number(part));
+
+  if (!parts.length || parts.some((part) => !Number.isFinite(part))) return 0;
+
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+
+  return 0;
+}
+
+function formatDurationTotal(seconds) {
+  if (!seconds) return "--";
+  const rounded = Math.round(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+
+  if (hours) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+
+  return `${minutes || 1}m`;
+}
+
+function recentVideoOrder() {
+  return new Map(readRecentVideos().map((id, index) => [id, index]));
+}
+
+function readRecentVideos() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENT_VIDEO_STORAGE) || "[]");
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function touchRecentVideo(videoId) {
+  const recent = readRecentVideos().filter((id) => id !== videoId);
+  recent.unshift(videoId);
+  localStorage.setItem(RECENT_VIDEO_STORAGE, JSON.stringify(recent.slice(0, 50)));
+}
+
 function playVideo(video) {
   const src = resolveVideoSource(video);
   state.currentVideoId = video.id;
+  touchRecentVideo(video.id);
   nowPlayingTitle.textContent = video.title;
   nowPlayingMeta.textContent = [video.duration, video.path].filter(Boolean).join(" / ");
   markActiveVideo(video.id);
+  if (state.sortMode === "recent") renderLibrary(state.videos);
 
   if (!src) {
     setStatus("未配置片源");
@@ -953,6 +1149,7 @@ async function refreshKeyUi() {
     keyBackupInput.value = formatKeyBackup(backup);
   }
   keyStatus.textContent = privateKey ? fingerprint || "已生成" : "未生成";
+  keyPanel.open = !privateKey;
   copyPublicKeyButton.disabled = !publicKeyOutput.value.trim();
   copyKeyBackupButton.disabled = !keyBackupInput.value.trim();
 }
@@ -1126,6 +1323,11 @@ function setStatus(message) {
   statusEl.textContent = message;
 }
 
+function setSessionUnlocked(unlocked) {
+  document.body.classList.toggle("is-unlocked", unlocked);
+  document.body.classList.toggle("is-locked", !unlocked);
+}
+
 async function restoreCachedLibrary() {
   if (!hasCachedLibraryFlag()) return false;
 
@@ -1153,6 +1355,7 @@ async function restoreCachedLibrary() {
   localStorage.setItem("manifestPath", cached.manifestPath);
   await configureServiceWorker();
   renderLibrary(state.videos);
+  setSessionUnlocked(true);
   setStatus("已自动恢复");
   return true;
 }

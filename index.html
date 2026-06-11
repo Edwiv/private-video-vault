@@ -11,20 +11,23 @@
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./assets/icon-192.png" />
-    <link rel="stylesheet" href="./styles.css?v=9" />
+    <link rel="stylesheet" href="./styles.css?v=16" />
   </head>
-  <body>
+  <body class="is-locked">
     <div class="app-shell">
       <header class="topbar">
-        <div>
+        <div class="brand-lockup">
           <p class="eyebrow">Private Video Vault</p>
           <h1>视频保险库</h1>
         </div>
-        <div class="status-pill" id="appStatus">离线就绪</div>
+        <div class="session-actions">
+          <div class="status-pill" id="appStatus">离线就绪</div>
+          <button class="secondary-button logout-button" id="logoutButton" type="button">退出</button>
+        </div>
       </header>
 
       <main class="workspace">
-        <section class="panel vault-panel" aria-labelledby="vaultTitle">
+        <aside class="panel vault-panel" aria-labelledby="vaultTitle">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Vault</p>
@@ -51,11 +54,11 @@
               <span>索引文件</span>
               <input id="manifestPath" name="manifestPath" autocomplete="off" value="/library.enc.json" required />
             </label>
-            <div class="key-panel">
-              <div class="key-status-row">
+            <details class="key-panel" open>
+              <summary class="key-summary">
                 <span>设备密钥</span>
                 <strong id="keyStatus">未生成</strong>
-              </div>
+              </summary>
               <textarea id="publicKey" rows="6" readonly placeholder="生成后显示公钥"></textarea>
               <label>
                 <span>备份口令</span>
@@ -70,7 +73,7 @@
                 <button class="secondary-button" id="copyKeyBackupButton" type="button">复制备份</button>
                 <button class="secondary-button" id="importKeyBackupButton" type="button">导入备份</button>
               </div>
-            </div>
+            </details>
             <label>
               <span>兼容口令</span>
               <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" />
@@ -80,29 +83,69 @@
               <button class="secondary-button" id="loadSampleButton" type="button">载入示例</button>
             </div>
           </form>
-        </section>
+        </aside>
 
-        <section class="panel library-panel" aria-labelledby="libraryTitle">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Library</p>
-              <h2 id="libraryTitle">片库</h2>
+        <div class="content-area">
+          <section class="player-zone" aria-label="播放器">
+            <div class="player-frame">
+              <video class="video-player" id="videoPlayer" controls playsinline preload="metadata"></video>
             </div>
-            <span class="count-badge" id="libraryCount">0</span>
-          </div>
-          <div class="library-list" id="libraryList" aria-live="polite"></div>
-        </section>
+            <div class="now-playing">
+              <div>
+                <p class="eyebrow">Now Playing</p>
+                <h2 id="nowPlayingTitle">未选择视频</h2>
+              </div>
+              <p id="nowPlayingMeta">等待解锁片库</p>
+            </div>
+          </section>
 
-        <section class="player-zone" aria-label="播放器">
-          <video class="video-player" id="videoPlayer" controls playsinline preload="metadata"></video>
-          <div class="now-playing">
-            <div>
-              <p class="eyebrow">Now Playing</p>
-              <h2 id="nowPlayingTitle">未选择视频</h2>
+          <section class="panel library-panel" aria-labelledby="libraryTitle">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Library</p>
+                <h2 id="libraryTitle">片库</h2>
+              </div>
+              <span class="count-badge" id="libraryCount">0</span>
             </div>
-            <p id="nowPlayingMeta">等待解锁片库</p>
-          </div>
-        </section>
+
+            <div class="library-stats" aria-label="片库统计">
+              <div>
+                <span>文件夹</span>
+                <strong id="folderCount">0</strong>
+              </div>
+              <div>
+                <span>可播放</span>
+                <strong id="sourceCount">0</strong>
+              </div>
+              <div>
+                <span>总时长</span>
+                <strong id="durationTotal">--</strong>
+              </div>
+            </div>
+
+            <div class="library-toolbar">
+              <label class="search-field">
+                <span>搜索</span>
+                <input id="librarySearch" type="search" autocomplete="off" placeholder="片名或文件夹" />
+              </label>
+              <label class="sort-field">
+                <span>排序</span>
+                <select id="sortMode">
+                  <option value="title">名称</option>
+                  <option value="path">文件夹</option>
+                  <option value="duration">时长</option>
+                  <option value="recent">最近播放</option>
+                </select>
+              </label>
+              <div class="toolbar-actions" aria-label="片库操作">
+                <button class="secondary-button compact-button" id="expandAllButton" type="button">展开</button>
+                <button class="secondary-button compact-button" id="collapseAllButton" type="button">收起</button>
+              </div>
+            </div>
+
+            <div class="library-list" id="libraryList" aria-live="polite"></div>
+          </section>
+        </div>
       </main>
     </div>
 
@@ -116,6 +159,6 @@
       </button>
     </template>
 
-    <script type="module" src="./app.js?v=9"></script>
+    <script type="module" src="./app.js?v=16"></script>
   </body>
 </html>

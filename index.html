@@ -54,9 +54,18 @@
                 <strong id="keyStatus">未生成</strong>
               </div>
               <textarea id="publicKey" rows="6" readonly placeholder="生成后显示公钥"></textarea>
+              <label>
+                <span>备份口令</span>
+                <input id="backupPassphrase" name="backupPassphrase" type="password" autocomplete="new-password" />
+              </label>
+              <textarea id="keyBackup" rows="6" placeholder="生成后显示加密私钥备份，也可以粘贴备份后导入"></textarea>
               <div class="actions key-actions">
                 <button class="secondary-button" id="generateKeyButton" type="button">生成密钥</button>
                 <button class="secondary-button" id="copyPublicKeyButton" type="button">复制公钥</button>
+              </div>
+              <div class="actions key-actions">
+                <button class="secondary-button" id="copyKeyBackupButton" type="button">复制备份</button>
+                <button class="secondary-button" id="importKeyBackupButton" type="button">导入备份</button>
               </div>
             </div>
             <label>

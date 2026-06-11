@@ -1,4 +1,4 @@
-const CACHE_NAME = "private-video-vault-v5";
+const CACHE_NAME = "private-video-vault-v6";
 const APP_SHELL = [
   "./",
   "./index.html",

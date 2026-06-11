@@ -17,7 +17,16 @@ npm run dev
 批量导入目录时，默认 `--mode copy`，只复制原始音视频码流，不重新编码、不压缩画质：
 
 ```bash
-node tools/build-vault-from-directory.mjs "/path/to/videos" vault --mode copy --force --verify --recipient-public-key recipient-public.pem
+node tools/build-vault-from-directory.mjs "/path/to/videos" vault \
+  --mode copy \
+  --force \
+  --verify \
+  --jobs 4 \
+  --max-load 12 \
+  --min-free-mem-gb 8 \
+  --min-free-disk-gb 200 \
+  --redact-paths \
+  --recipient-public-key recipient-public.pem
 ```
 
 也可以继续用旧口令模式生成单文件 demo：

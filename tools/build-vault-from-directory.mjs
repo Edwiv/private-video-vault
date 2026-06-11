@@ -9,7 +9,8 @@ import {
 } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
-import { readdir, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { readdir, readFile, rm, stat, statfs, writeFile, mkdir } from "node:fs/promises";
+import { cpus, loadavg } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -18,7 +19,7 @@ const options = parseArgs(process.argv.slice(2));
 
 if (!options.sourceRoot) {
   console.error(
-    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify] [--passphrase-stdin] [--recipient-public-key public.pem]",
+    "Usage: node tools/build-vault-from-directory.mjs <source-dir> [target-dir] [--mode copy|transcode] [--force] [--verify] [--jobs n] [--max-load n] [--min-free-mem-gb n] [--min-free-disk-gb n] [--redact-paths] [--passphrase-stdin] [--recipient-public-key public.pem]",
   );
   process.exit(1);
 }
@@ -52,38 +53,14 @@ console.log(`Video files: ${sourceFiles.length}`);
 console.log(`Already imported: ${importedPaths.size}`);
 console.log(`Mode: ${options.mode === "copy" ? "copy original streams, no compression" : "transcode"}`);
 console.log(`Manifest crypto: ${recipientPublicKey ? "recipient public key" : "legacy passphrase"}`);
+console.log(`Jobs: ${options.jobs}`);
+console.log(
+  `Resource guard: max load ${options.maxLoad.toFixed(1)}, min memory ${formatBytes(options.minFreeMemBytes)}, min disk ${formatBytes(options.minFreeDiskBytes)}`,
+);
 
 await writeEncryptedLibrary(library, libraryPath);
 
-for (let index = 0; index < sourceFiles.length; index += 1) {
-  const sourcePath = sourceFiles[index];
-  const relativePath = toVaultPath(relative(sourceRoot, sourcePath));
-  const libraryItemPath = stripExtensionPath(relativePath);
-
-  if (importedPaths.has(libraryItemPath)) {
-    console.log(`[${index + 1}/${sourceFiles.length}] skip ${relativePath}`);
-    continue;
-  }
-
-  try {
-    const sourceStat = await stat(sourcePath);
-    if (sourceStat.size === 0) {
-      skippedEmpty.push(relativePath);
-      console.warn(`[${index + 1}/${sourceFiles.length}] skip empty ${relativePath}`);
-      continue;
-    }
-
-    console.log(`[${index + 1}/${sourceFiles.length}] import ${relativePath}`);
-    const video = await importVideo(sourcePath, relativePath, libraryItemPath);
-    library.videos.push(video);
-    importedPaths.add(libraryItemPath);
-    await writeEncryptedLibrary(library, libraryPath);
-  } catch (error) {
-    failures.push({ path: relativePath, error: error.message || String(error) });
-    console.error(`[${index + 1}/${sourceFiles.length}] failed ${relativePath}`);
-    console.error(error.message || error);
-  }
-}
+await importVideosConcurrently(sourceFiles);
 
 if (options.verify) {
   console.log("Verifying encrypted library and HLS entries...");
@@ -98,7 +75,7 @@ console.log(`Failures: ${failures.length}`);
 
 if (failures.length) {
   for (const failure of failures) {
-    console.error(`FAIL ${failure.path}: ${failure.error}`);
+    console.error(`FAIL ${displayPath(failure.path)}: ${failure.error}`);
   }
   process.exit(2);
 }
@@ -158,6 +135,110 @@ function createEmptyLibrary() {
     createdAt: new Date().toISOString(),
     videos: [],
   };
+}
+
+async function importVideosConcurrently(files) {
+  let nextIndex = 0;
+  let writeQueue = Promise.resolve();
+
+  async function writeLibraryQueued() {
+    writeQueue = writeQueue.then(() => writeEncryptedLibrary(library, libraryPath));
+    return writeQueue;
+  }
+
+  async function worker(workerId) {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= files.length) return;
+      await importOne(files[index], index, workerId, writeLibraryQueued);
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(options.jobs, files.length || 1));
+  await Promise.all(Array.from({ length: workerCount }, (_, index) => worker(index + 1)));
+  await writeQueue;
+}
+
+async function importOne(sourcePath, index, workerId, writeLibraryQueued) {
+  const relativePath = toVaultPath(relative(sourceRoot, sourcePath));
+  const libraryItemPath = stripExtensionPath(relativePath);
+
+  if (importedPaths.has(libraryItemPath)) {
+    logProgress(index, "skip", relativePath, workerId);
+    return;
+  }
+
+  try {
+    const sourceStat = await stat(sourcePath);
+    if (sourceStat.size === 0) {
+      skippedEmpty.push(relativePath);
+      logProgress(index, "skip empty", relativePath, workerId, "warn");
+      return;
+    }
+
+    await waitForResources(workerId);
+    logProgress(index, "import", relativePath, workerId);
+    const video = await importVideo(sourcePath, relativePath, libraryItemPath);
+    Object.defineProperty(video, "__order", {
+      value: index,
+      enumerable: false,
+    });
+    library.videos.push(video);
+    library.videos.sort((left, right) => (left.__order ?? 0) - (right.__order ?? 0));
+    importedPaths.add(libraryItemPath);
+    await writeLibraryQueued();
+  } catch (error) {
+    failures.push({ path: relativePath, error: error.message || String(error) });
+    logProgress(index, "failed", relativePath, workerId, "error");
+    console.error(error.message || error);
+  }
+}
+
+function logProgress(index, action, relativePath, workerId, level = "log") {
+  const message = `[${index + 1}/${sourceFiles.length} w${workerId}] ${action} ${displayPath(relativePath)}`;
+  console[level](message);
+}
+
+async function waitForResources(workerId) {
+  while (true) {
+    const usage = await readResourceUsage();
+    const loadOk = usage.load1 <= options.maxLoad;
+    const memOk = usage.freeMemBytes >= options.minFreeMemBytes;
+    const diskOk = usage.freeDiskBytes >= options.minFreeDiskBytes;
+
+    if (loadOk && memOk && diskOk) {
+      return;
+    }
+
+    console.warn(
+      `[resource w${workerId}] waiting load=${usage.load1.toFixed(2)} freeMem=${formatBytes(usage.freeMemBytes)} freeDisk=${formatBytes(usage.freeDiskBytes)}`,
+    );
+    await sleep(5000);
+  }
+}
+
+async function readResourceUsage() {
+  const fsStats = await statfs(targetRoot);
+  return {
+    load1: loadavg()[0] || 0,
+    freeMemBytes: await readAvailableMemoryBytes(),
+    freeDiskBytes: Number(fsStats.bavail) * Number(fsStats.bsize),
+  };
+}
+
+async function readAvailableMemoryBytes() {
+  try {
+    const meminfo = await readFile("/proc/meminfo", "utf8");
+    const match = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+    if (match) {
+      return Number(match[1]) * 1024;
+    }
+  } catch {
+    // Fall back below on non-Linux hosts.
+  }
+
+  return Number.MAX_SAFE_INTEGER;
 }
 
 async function importVideo(sourcePath, relativePath, libraryItemPath) {
@@ -302,7 +383,7 @@ function warnIfCopyMayBeUnsupported(info, relativePath) {
 
   if (!supportedVideo || !supportedAudio) {
     console.warn(
-      `Warning: ${relativePath} keeps codecs as-is. iPhone HLS playback is most reliable with H.264 or HEVC video and AAC audio; found ${info.videoCodec || "unknown"}/${info.audioCodec || "none"}.`,
+      `Warning: ${displayPath(relativePath)} keeps codecs as-is. iPhone HLS playback is most reliable with H.264 or HEVC video and AAC audio; found ${info.videoCodec || "unknown"}/${info.audioCodec || "none"}.`,
     );
   }
 }
@@ -335,7 +416,7 @@ async function verifyLibrary(library) {
 
       try {
         await verifyVideo(video, variant, verifyRoot);
-        console.log(`[verify ${index + 1}/${library.videos.length}] ok ${video.path || video.title}`);
+        console.log(`[verify ${index + 1}/${library.videos.length}] ok ${displayPath(video.path || video.title)}`);
       } catch (error) {
         failures.push({ path: video.path || video.title || video.id, error: error.message || String(error) });
       }
@@ -524,12 +605,35 @@ function toVaultPath(path) {
   return path.split(sep).filter(Boolean).join("/");
 }
 
+function displayPath(path) {
+  return options.redactPaths ? "[redacted]" : path;
+}
+
+function formatBytes(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = Number(bytes || 0);
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)}${units[unitIndex]}`;
+}
+
 function parseArgs(args) {
+  const gib = 1024 ** 3;
   const parsed = {
     force: false,
+    jobs: 1,
+    maxLoad: Math.max(1, cpus().length * 0.75),
+    minFreeDiskBytes: 100 * gib,
+    minFreeMemBytes: 4 * gib,
     mode: "copy",
     passphraseStdin: false,
     recipientPublicKeyPath: "",
+    redactPaths: false,
     sourceRoot: "",
     targetRoot: "vault-next",
     verify: false,
@@ -543,8 +647,27 @@ function parseArgs(args) {
       parsed.force = true;
     } else if (arg === "--verify") {
       parsed.verify = true;
+    } else if (arg === "--redact-paths") {
+      parsed.redactPaths = true;
     } else if (arg === "--passphrase-stdin") {
       parsed.passphraseStdin = true;
+    } else if (arg === "--jobs") {
+      parsed.jobs = parsePositiveInteger("--jobs", args[++index]);
+    } else if (arg.startsWith("--jobs=")) {
+      parsed.jobs = parsePositiveInteger("--jobs", arg.slice("--jobs=".length));
+    } else if (arg === "--max-load") {
+      parsed.maxLoad = parsePositiveNumber("--max-load", args[++index]);
+    } else if (arg.startsWith("--max-load=")) {
+      parsed.maxLoad = parsePositiveNumber("--max-load", arg.slice("--max-load=".length));
+    } else if (arg === "--min-free-mem-gb") {
+      parsed.minFreeMemBytes = parsePositiveNumber("--min-free-mem-gb", args[++index]) * gib;
+    } else if (arg.startsWith("--min-free-mem-gb=")) {
+      parsed.minFreeMemBytes = parsePositiveNumber("--min-free-mem-gb", arg.slice("--min-free-mem-gb=".length)) * gib;
+    } else if (arg === "--min-free-disk-gb") {
+      parsed.minFreeDiskBytes = parsePositiveNumber("--min-free-disk-gb", args[++index]) * gib;
+    } else if (arg.startsWith("--min-free-disk-gb=")) {
+      parsed.minFreeDiskBytes =
+        parsePositiveNumber("--min-free-disk-gb", arg.slice("--min-free-disk-gb=".length)) * gib;
     } else if (arg === "--recipient-public-key") {
       parsed.recipientPublicKeyPath = String(args[++index] || "");
     } else if (arg.startsWith("--recipient-public-key=")) {
@@ -564,6 +687,22 @@ function parseArgs(args) {
 
   parsed.sourceRoot = positional[0] || "";
   parsed.targetRoot = positional[1] || "vault-next";
+  return parsed;
+}
+
+function parsePositiveInteger(name, value) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parsePositiveNumber(name, value) {
+  const parsed = Number(String(value || ""));
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
   return parsed;
 }
 
@@ -620,6 +759,12 @@ function capture(command, args) {
       if (code === 0) resolve(stdout);
       else reject(new Error(stderr || `${command} exited with ${code}`));
     });
+  });
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
   });
 }
 

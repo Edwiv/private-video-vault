@@ -50,7 +50,7 @@ const server = createServer(async (request, response) => {
     if (range) {
       response.writeHead(206, {
         "Accept-Ranges": "bytes",
-        "Cache-Control": pathname === "/library.enc.json" ? "no-store" : "public, max-age=31536000, immutable",
+        "Cache-Control": cacheControl(pathname),
         "Content-Length": range.end - range.start + 1,
         "Content-Range": `bytes ${range.start}-${range.end}/${fileStat.size}`,
         "Content-Type": contentType(target),
@@ -67,7 +67,7 @@ const server = createServer(async (request, response) => {
 
     response.writeHead(200, {
       "Accept-Ranges": "bytes",
-      "Cache-Control": pathname === "/library.enc.json" ? "no-store" : "public, max-age=31536000, immutable",
+      "Cache-Control": cacheControl(pathname),
       "Content-Length": fileStat.size,
       "Content-Type": contentType(target),
     });
@@ -96,6 +96,12 @@ function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Private-Network", "true");
   response.setHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
   response.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+}
+
+function cacheControl(pathname) {
+  return pathname === "/library.enc.json" || pathname === "/library.append.json"
+    ? "no-store"
+    : "public, max-age=31536000, immutable";
 }
 
 function parseRange(header, size) {

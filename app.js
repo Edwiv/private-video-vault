@@ -104,7 +104,9 @@ form.addEventListener("submit", async (event) => {
 
   try {
     const encryptedManifest = await fetchEncryptedManifest(vaultOrigin, manifestPath);
-    const library = await decryptManifest(encryptedManifest, passphrase);
+    const baseLibrary = await decryptManifest(encryptedManifest, passphrase);
+    const appendLibrary = await fetchAppendLibrary(vaultOrigin, manifestPath);
+    const library = mergeLibraries(baseLibrary, appendLibrary);
     state.vaultOrigin = vaultOrigin;
     state.manifestPath = manifestPath;
     state.videos = normalizeLibrary(library);
@@ -246,6 +248,68 @@ async function fetchEncryptedManifest(vaultOrigin, manifestPath) {
   return response.json();
 }
 
+async function fetchAppendLibrary(vaultOrigin, manifestPath) {
+  const response = await fetch(`${vaultOrigin}${appendIndexPath(manifestPath)}`, {
+    cache: "no-store",
+    mode: "cors",
+  });
+
+  if (response.status === 404) {
+    return { videos: [] };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Append manifest request failed: ${response.status}`);
+  }
+
+  const index = await response.json();
+  if (!index || index.version !== 1 || !Array.isArray(index.items)) {
+    throw new Error("Unsupported append manifest");
+  }
+
+  const videos = [];
+  for (const itemPath of index.items) {
+    try {
+      const envelope = await fetchAppendItem(vaultOrigin, itemPath);
+      const item = await decryptRecipientEnvelope(envelope);
+      const video = item?.video || item;
+      if (video && typeof video === "object") {
+        videos.push(video);
+      }
+    } catch (error) {
+      console.warn("Append item skipped", error);
+    }
+  }
+
+  return { videos };
+}
+
+async function fetchAppendItem(vaultOrigin, itemPath) {
+  const response = await fetch(`${vaultOrigin}${normalizePath(itemPath)}`, {
+    cache: "no-store",
+    mode: "cors",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Append item request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function appendIndexPath(manifestPath) {
+  const normalized = normalizePath(manifestPath);
+  return normalized.replace(/\/[^/]*$/, "/library.append.json");
+}
+
+function mergeLibraries(...libraries) {
+  return {
+    videos: libraries.flatMap((library) => (Array.isArray(library?.videos) ? library.videos : [])),
+    folders: libraries.flatMap((library) => (Array.isArray(library?.folders) ? library.folders : [])),
+    directories: libraries.flatMap((library) => (Array.isArray(library?.directories) ? library.directories : [])),
+  };
+}
+
 async function decryptManifest(envelope, passphrase) {
   if (!envelope || envelope.version !== 1) {
     if (envelope?.version === 2) {
@@ -291,6 +355,10 @@ async function decryptManifest(envelope, passphrase) {
 }
 
 async function decryptRecipientManifest(envelope) {
+  return decryptRecipientEnvelope(envelope);
+}
+
+async function decryptRecipientEnvelope(envelope) {
   if (envelope.cipher !== "AES-GCM" || envelope.keyWrap?.name !== "RSA-OAEP") {
     throw new Error("Unsupported recipient envelope");
   }

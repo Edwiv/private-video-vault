@@ -93,6 +93,7 @@ function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Range, Content-Type");
+  response.setHeader("Access-Control-Allow-Private-Network", "true");
   response.setHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
   response.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
 }

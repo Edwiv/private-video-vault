@@ -5,6 +5,15 @@ const state = {
   currentVideoId: "",
 };
 
+const CACHE_DB_NAME = "private-video-vault";
+const CACHE_DB_VERSION = 1;
+const CACHE_RECORD_STORE = "records";
+const CACHE_KEY_STORE = "keys";
+const LIBRARY_CACHE_KEY = "active-library";
+const LIBRARY_DEVICE_KEY = "library-device-key";
+const LIBRARY_CACHE_FLAG = "libraryCacheSaved";
+const LIBRARY_CACHE_COOKIE = "videoVaultRemembered";
+
 const sampleLibrary = {
   videos: [
     {
@@ -57,6 +66,9 @@ vaultOriginInput.value = state.vaultOrigin;
 manifestPathInput.value = state.manifestPath;
 
 renderLibrary([]);
+restoreCachedLibrary().catch((error) => {
+  console.warn("Cached library restore failed", error);
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -74,9 +86,10 @@ form.addEventListener("submit", async (event) => {
     state.videos = normalizeLibrary(library);
     localStorage.setItem("vaultOrigin", vaultOrigin);
     localStorage.setItem("manifestPath", manifestPath);
+    const cacheSaved = await saveCachedLibrary({ vaultOrigin, manifestPath, library });
     await configureServiceWorker();
     renderLibrary(state.videos);
-    setStatus("已解锁");
+    setStatus(cacheSaved ? "已解锁并记住" : "已解锁");
   } catch (error) {
     console.error(error);
     state.videos = [];
@@ -93,7 +106,8 @@ document.querySelector("#loadSampleButton").addEventListener("click", () => {
   setStatus("示例已载入");
 });
 
-document.querySelector("#clearConfigButton").addEventListener("click", () => {
+document.querySelector("#clearConfigButton").addEventListener("click", async () => {
+  setStatus("正在清除");
   localStorage.removeItem("vaultOrigin");
   localStorage.removeItem("manifestPath");
   vaultOriginInput.value = "";
@@ -105,7 +119,8 @@ document.querySelector("#clearConfigButton").addEventListener("click", () => {
   videoPlayer.load();
   nowPlayingTitle.textContent = "未选择视频";
   nowPlayingMeta.textContent = "等待解锁片库";
-  configureServiceWorker().catch((error) => console.warn("Worker clear failed", error));
+  await clearCachedLibrary();
+  await configureServiceWorker().catch((error) => console.warn("Worker clear failed", error));
   renderLibrary([]);
   setStatus("配置已清除");
 });
@@ -465,8 +480,223 @@ function fromBase64(value) {
   return bytes;
 }
 
+function toBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+async function restoreCachedLibrary() {
+  if (!hasCachedLibraryFlag()) return false;
+
+  const record = await idbGet(CACHE_RECORD_STORE, LIBRARY_CACHE_KEY);
+  if (!record) {
+    clearCachedLibraryFlags();
+    return false;
+  }
+
+  setStatus("正在恢复");
+  const cached = await decryptCacheRecord(record);
+
+  if (!cached?.vaultOrigin || !cached?.manifestPath || !cached?.library) {
+    throw new Error("Invalid cached library");
+  }
+
+  state.vaultOrigin = cached.vaultOrigin;
+  state.manifestPath = cached.manifestPath;
+  state.videos = normalizeLibrary(cached.library);
+  state.currentVideoId = "";
+  vaultOriginInput.value = cached.vaultOrigin;
+  manifestPathInput.value = cached.manifestPath;
+  passphraseInput.value = "";
+  localStorage.setItem("vaultOrigin", cached.vaultOrigin);
+  localStorage.setItem("manifestPath", cached.manifestPath);
+  await configureServiceWorker();
+  renderLibrary(state.videos);
+  setStatus("已自动恢复");
+  return true;
+}
+
+async function saveCachedLibrary({ vaultOrigin, manifestPath, library }) {
+  try {
+    const record = await encryptCacheRecord({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      vaultOrigin,
+      manifestPath,
+      library,
+    });
+
+    await idbSet(CACHE_RECORD_STORE, LIBRARY_CACHE_KEY, record);
+    setCachedLibraryFlags();
+    return true;
+  } catch (error) {
+    clearCachedLibraryFlags();
+    console.warn("Library cache save failed", error);
+    return false;
+  }
+}
+
+async function clearCachedLibrary() {
+  await Promise.allSettled([
+    idbDelete(CACHE_RECORD_STORE, LIBRARY_CACHE_KEY),
+    idbDelete(CACHE_KEY_STORE, LIBRARY_DEVICE_KEY),
+  ]);
+  clearCachedLibraryFlags();
+}
+
+async function encryptCacheRecord(payload) {
+  const key = await getLibraryDeviceKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+
+  return {
+    version: 1,
+    cipher: "AES-GCM",
+    iv: toBase64(iv),
+    data: toBase64(encrypted),
+  };
+}
+
+async function decryptCacheRecord(record) {
+  if (!record || record.version !== 1 || record.cipher !== "AES-GCM") {
+    throw new Error("Unsupported cached library");
+  }
+
+  const key = await getLibraryDeviceKey(false);
+  if (!key) {
+    throw new Error("Missing cached library key");
+  }
+
+  const iv = fromBase64(record.iv);
+  const encrypted = fromBase64(record.data);
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+async function getLibraryDeviceKey(createIfMissing = true) {
+  const existing = await idbGet(CACHE_KEY_STORE, LIBRARY_DEVICE_KEY);
+  if (existing) return existing;
+  if (!createIfMissing) return null;
+
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  await idbSet(CACHE_KEY_STORE, LIBRARY_DEVICE_KEY, key);
+  return key;
+}
+
+function hasCachedLibraryFlag() {
+  return localStorage.getItem(LIBRARY_CACHE_FLAG) === "1" || readCookie(LIBRARY_CACHE_COOKIE) === "1";
+}
+
+function setCachedLibraryFlags() {
+  localStorage.setItem(LIBRARY_CACHE_FLAG, "1");
+  writeCookie(LIBRARY_CACHE_COOKIE, "1", 60 * 60 * 24 * 365);
+}
+
+function clearCachedLibraryFlags() {
+  localStorage.removeItem(LIBRARY_CACHE_FLAG);
+  writeCookie(LIBRARY_CACHE_COOKIE, "", 0);
+}
+
+function readCookie(name) {
+  return document.cookie
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+function writeCookie(name, value, maxAge) {
+  const secure = location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=${cookiePath()}; SameSite=Lax${secure}`;
+}
+
+function cookiePath() {
+  return new URL(".", location.href).pathname || "/";
+}
+
+function openCacheDb() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window) || !crypto?.subtle) {
+      reject(new Error("Browser storage is unavailable"));
+      return;
+    }
+
+    const request = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(CACHE_RECORD_STORE)) {
+        db.createObjectStore(CACHE_RECORD_STORE);
+      }
+      if (!db.objectStoreNames.contains(CACHE_KEY_STORE)) {
+        db.createObjectStore(CACHE_KEY_STORE);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+  });
+}
+
+async function idbGet(storeName, key) {
+  const db = await openCacheDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).get(key);
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB get failed"));
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("IndexedDB transaction failed"));
+    };
+  });
+}
+
+async function idbSet(storeName, key, value) {
+  const db = await openCacheDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    const request = transaction.objectStore(storeName).put(value, key);
+
+    request.onerror = () => reject(request.error || new Error("IndexedDB set failed"));
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("IndexedDB transaction failed"));
+    };
+  });
+}
+
+async function idbDelete(storeName, key) {
+  const db = await openCacheDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    const request = transaction.objectStore(storeName).delete(key);
+
+    request.onerror = () => reject(request.error || new Error("IndexedDB delete failed"));
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("IndexedDB transaction failed"));
+    };
+  });
 }
 
 async function registerServiceWorker() {

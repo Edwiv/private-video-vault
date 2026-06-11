@@ -19,6 +19,7 @@
 html {
   min-height: 100%;
   background: var(--bg);
+  touch-action: manipulation;
 }
 
 body {
@@ -159,6 +160,7 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text);
+  font-size: 16px;
   background: #0f141c;
   outline: none;
 }
@@ -175,7 +177,6 @@ textarea {
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     monospace;
-  font-size: 0.76rem;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }

@@ -1,9 +1,9 @@
-const CACHE_NAME = "private-video-vault-v6";
+const CACHE_NAME = "private-video-vault-v7";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
+  "./styles.css?v=7",
+  "./app.js?v=7",
   "./manifest.webmanifest",
   "./assets/icon.svg",
   "./assets/icon-192.png",
